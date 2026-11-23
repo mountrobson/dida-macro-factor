@@ -397,13 +397,34 @@ function rankGeminiModels(names) {
   return out;
 }
 
+// Turn a Gemini error response into a message that shows Google's own reason plus a hint.
+function geminiError(res, data) {
+  const e = data?.error || {};
+  const reason = (e.details || []).map((d) => d.reason).find(Boolean) || e.status || '';
+  const raw = e.message || `HTTP ${res.status}`;
+  let hint = '';
+  if (reason === 'API_KEY_INVALID' || reason === 'ACCESS_TOKEN_TYPE_UNSUPPORTED' || /api key not valid/i.test(raw)) {
+    hint = 'Copy the key again: open the key in aistudio.google.com/apikey and tap "Copy key" (the list view shows a shortened key). New keys start with "AQ." and are about 53 characters; older ones start with "AIza".';
+  }
+  else if (/referer|referrer/i.test(raw) || reason === 'API_KEY_HTTP_REFERRER_BLOCKED') hint = 'The key has website restrictions. In Google Cloud Console, either remove them or allow https://mountrobson.github.io/*.';
+  else if (/location is not supported|region/i.test(raw)) hint = 'Google does not offer the Gemini API in your country.';
+  else if (reason === 'SERVICE_DISABLED' || /has not been used|is disabled/i.test(raw)) hint = 'Enable the "Generative Language API" for the key\'s project, or create the key from aistudio.google.com instead.';
+  else if (/unregistered callers|without.*key|missing.*key/i.test(raw)) hint = 'No key reached Google. Paste the key and tap Save.';
+  const err = new Error(`Google said: ${raw}${hint ? ` ${hint}` : ''} (HTTP ${res.status})`);
+  err.status = res.status;
+  err.reason = reason;
+  err.raw = raw;
+  return err;
+}
+const isKeyProblem = (e) => e.status === 401 || e.status === 403 || /API_KEY|ACCESS_TOKEN/.test(e.reason || '') || /api key|referer|location is not supported/i.test(e.raw || '');
+
+// Used if listing models fails (some key types may not be allowed to list models).
+const GEMINI_FALLBACK_MODELS = ['gemini-flash-latest', 'gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash-lite', 'gemini-flash-lite-latest'];
+
 async function listGeminiModels() {
   const res = await fetch(`${GEMINI_BASE}/models?pageSize=1000`, { headers: { 'x-goog-api-key': settings.geminiKey } });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    if (res.status === 400 || res.status === 403) throw new Error('The Gemini key was rejected. Check it in Settings.');
-    throw new Error(data?.error?.message || `HTTP ${res.status}`);
-  }
+  if (!res.ok) throw geminiError(res, data);
   const names = (data.models || [])
     .filter((m) => (m.supportedGenerationMethods || []).includes('generateContent'))
     .map((m) => m.name.replace(/^models\//, ''));
@@ -430,11 +451,7 @@ async function geminiGenerate(model, { imageDataUrl, note }, structured = true) 
     body: JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err = new Error(data?.error?.message || `HTTP ${res.status}`);
-    err.status = res.status;
-    throw err;
-  }
+  if (!res.ok) throw geminiError(res, data);
   const cand = (data.candidates || [])[0];
   if (!cand) throw new Error(data.promptFeedback?.blockReason ? 'Gemini declined this photo. Enter the numbers yourself.' : 'Gemini returned no answer. Try again.');
   if (cand.finishReason === 'MAX_TOKENS') throw new Error('The estimate got cut off. Try again.');
@@ -445,9 +462,13 @@ async function geminiGenerate(model, { imageDataUrl, note }, structured = true) 
 }
 
 async function callGemini(args) {
-  let candidates = settings.geminiModel ? [settings.geminiModel]
-    : (settings.geminiCandidates?.length ? settings.geminiCandidates : await listGeminiModels());
-  if (!candidates.length) throw new Error('This key has no Gemini Flash models available.');
+  let candidates = settings.geminiModel ? [settings.geminiModel] : settings.geminiCandidates;
+  if (!candidates?.length) {
+    // Listing is only a convenience: if it fails, try well-known models directly. A real key
+    // problem then shows up on the generate call, which is the error that matters.
+    try { candidates = await listGeminiModels(); } catch { candidates = []; }
+    if (!candidates.length) { candidates = GEMINI_FALLBACK_MODELS; settings.geminiCandidates = candidates; saveSettings(); }
+  }
   // Skip models whose free daily limit already ran out today (limits reset at midnight Pacific;
   // the local date is close enough, and a wrong skip just falls back to the next model).
   const spent = (settings.geminiSpent?.date === todayKey()) ? settings.geminiSpent.models : [];
@@ -464,8 +485,7 @@ async function callGemini(args) {
       }
     } catch (e) {
       lastErr = e;
-      if (e.status === 400 && /api key/i.test(e.message)) throw new Error('The Gemini key was rejected. Check it in Settings.');
-      if (e.status === 403) throw new Error('The Gemini key was rejected. Check it in Settings.');
+      if (isKeyProblem(e)) throw e;
       // Daily free limit hit on this model, or model gone: try the next one.
       if (e.status === 429 || e.status === 404) {
         if (e.status === 404 && !settings.geminiModel) settings.geminiCandidates = null;
@@ -625,7 +645,7 @@ function renderGeminiModels() {
 }
 function readAiSettings() {
   settings.provider = $('#provider').value;
-  const gk = $('#geminiKey').value.trim();
+  const gk = $('#geminiKey').value.replace(/[\s"'`]/g, '');
   if (gk !== settings.geminiKey) { settings.geminiKey = gk; settings.geminiCandidates = null; }
   settings.geminiModel = $('#geminiModel').value;
   settings.apiKey = $('#apiKey').value.trim();
@@ -750,9 +770,13 @@ function bind() {
     if (!hasAiKey()) { toast('Paste a key first'); return; }
     $('#aiStatus').innerHTML = '<span class="spinner"></span> Testing…';
     try {
-      if (settings.provider === 'gemini' && !settings.geminiModel) { await listGeminiModels(); renderGeminiModels(); }
+      if (settings.provider === 'gemini' && !settings.geminiModel) {
+        settings.geminiCandidates = null;
+        try { await listGeminiModels(); renderGeminiModels(); } catch { /* callAi falls back to known models */ }
+      }
       const r = await callAi({ note: 'One medium banana.' });
-      const which = settings.provider === 'gemini' ? ` Models available: ${(settings.geminiCandidates || [settings.geminiModel]).slice(0, 3).join(', ')}.` : '';
+      const models = (settings.geminiModel ? [settings.geminiModel] : settings.geminiCandidates || []).slice(0, 3);
+      const which = settings.provider === 'gemini' && models.length ? ` Models: ${models.join(', ')}.` : '';
       $('#aiStatus').textContent = `Works. Test answer: one banana ≈ ${round(r.kcal)} kcal.${which}`;
     } catch (err) { $('#aiStatus').textContent = `Failed: ${err.message}`; }
   });
