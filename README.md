@@ -6,7 +6,7 @@ Live site: https://mountrobson.github.io/dida-macro-factor/
 
 ## Features
 
-- **Photo logging**: take a photo (or pick one from your library), optionally add a note ("cooked in butter"), and an AI (Google Gemini on its free tier by default, or Anthropic Claude if you prefer to pay) estimates each item and the totals. Every number is editable before you save, and there are quick portion buttons (½× to 2×).
+- **Photo logging**: take a photo (or pick one from your library), optionally add a note ("cooked in butter"), and an AI (Google Gemini on its free tier by default, or Anthropic Claude if you prefer to pay) estimates each item and the totals. Each item is editable (change numbers, scale with ½ / −25% / +25% / 2×, remove, add), totals add up automatically, and you can type a correction like "only 2 eggs" and tap **Fix with AI**. Logged entries can be reopened and fixed the same way.
 - **Manual entry** with one-tap re-logging of recent foods.
 - **Daily dashboard**: calories left, protein/carb/fat bars, entries grouped by meal, and day-by-day navigation.
 - **Targets**: set them yourself or have them calculated from age, height, weight, activity and goal.

@@ -194,11 +194,83 @@ function readForm() {
   };
 }
 
-function renderItems(items, confidence, notes) {
-  if (!items || !items.length) { $('#eItems').innerHTML = ''; return; }
-  $('#eItems').innerHTML = `<div>What the AI saw:</div><ul>${items.map((i) =>
-    `<li>${esc(i.name)}${i.portion ? ` (${esc(i.portion)})` : ''}: ${round(i.kcal)} kcal, ${round(i.protein_g)}P ${round(i.carbs_g)}C ${round(i.fat_g)}F</li>`).join('')}</ul>
-    ${confidence ? `<div class="conf">Confidence: ${esc(confidence)}${notes ? ` · ${esc(notes)}` : ''}</div>` : ''}`;
+/* ---------- editable items ----------
+ * An entry can have a list of items (from the AI, or added by hand). Editing any item
+ * re-adds the totals. Editing a total directly is also allowed (it then overrides). */
+let items = [];              // [{ name, portion, kcal, p, c, f }]
+let aiMeta = null;           // { confidence, notes } from the last AI estimate
+
+// AI items use protein_g etc.; stored and edited items use p/c/f. Accept both.
+const normItem = (i) => ({
+  name: i.name || '', portion: i.portion || '',
+  kcal: +(i.kcal ?? 0) || 0, p: +(i.p ?? i.protein_g ?? 0) || 0, c: +(i.c ?? i.carbs_g ?? 0) || 0, f: +(i.f ?? i.fat_g ?? 0) || 0,
+});
+const r1 = (n) => Math.round(n * 10) / 10;
+
+function setItems(list, meta) {
+  items = (list || []).map(normItem);
+  if (meta !== undefined) aiMeta = meta;
+  baseMacros = null;
+  renderItemEditor();
+}
+
+function renderItemEditor() {
+  const box = $('#eItems');
+  const meta = aiMeta?.confidence ? `<div class="conf">AI confidence: ${esc(aiMeta.confidence)}${aiMeta.notes ? ` · ${esc(aiMeta.notes)}` : ''}</div>` : '';
+  box.innerHTML = `<div class="items-head"><span>${items.length ? 'Items (tap a number to change it)' : 'Items'}</span>
+      <button type="button" id="addItem">＋ Add item</button></div>${meta}
+    ${items.map((it, i) => `<div class="item-row" data-i="${i}">
+      <div class="item-top">
+        <input class="i-name" data-k="name" value="${esc(it.name)}" placeholder="Food" aria-label="Item name">
+        <input class="i-portion" data-k="portion" value="${esc(it.portion)}" placeholder="amount" aria-label="Amount">
+        <button type="button" class="i-del" aria-label="Remove item">✕</button>
+      </div>
+      <div class="i-nums">
+        <label>kcal<input type="number" inputmode="decimal" data-k="kcal" value="${round(it.kcal)}"></label>
+        <label>Protein<input type="number" inputmode="decimal" data-k="p" value="${r1(it.p)}"></label>
+        <label>Carbs<input type="number" inputmode="decimal" data-k="c" value="${r1(it.c)}"></label>
+        <label>Fat<input type="number" inputmode="decimal" data-k="f" value="${r1(it.f)}"></label>
+      </div>
+      <div class="i-steps">
+        <button type="button" data-mul="0.5">½</button><button type="button" data-mul="0.75">−25%</button>
+        <button type="button" data-mul="1.25">+25%</button><button type="button" data-mul="2">2×</button>
+      </div></div>`).join('')}`;
+
+  $('#addItem').addEventListener('click', () => {
+    items.push(normItem({ name: '' }));
+    renderItemEditor();
+    const rows = $$('#eItems .item-row');
+    rows[rows.length - 1]?.querySelector('.i-name').focus();
+  });
+  $$('#eItems .item-row').forEach((row) => {
+    const i = +row.dataset.i;
+    row.querySelectorAll('input').forEach((inp) => inp.addEventListener('input', () => {
+      const k = inp.dataset.k;
+      items[i][k] = (k === 'name' || k === 'portion') ? inp.value : (+inp.value || 0);
+      if (k !== 'name' && k !== 'portion') totalsFromItems();
+    }));
+    row.querySelector('.i-del').addEventListener('click', () => { items.splice(i, 1); renderItemEditor(); totalsFromItems(); });
+    row.querySelectorAll('[data-mul]').forEach((b) => b.addEventListener('click', () => {
+      const m = +b.dataset.mul;
+      const it = items[i];
+      Object.assign(it, { kcal: it.kcal * m, p: it.p * m, c: it.c * m, f: it.f * m });
+      if (it.portion) it.portion = scalePortion(it.portion, m);
+      renderItemEditor(); totalsFromItems();
+    }));
+  });
+}
+
+// "150 g" × 1.5 → "225 g"; leaves text without a leading number alone.
+function scalePortion(portion, m) {
+  return portion.replace(/^(\d+(?:[.,]\d+)?)/, (n) => String(r1(parseFloat(n.replace(',', '.')) * m)));
+}
+
+function totalsFromItems() {
+  baseMacros = null;
+  if (!items.length) { $('#totalsHint').textContent = ''; return; }
+  const s = items.reduce((a, it) => ({ kcal: a.kcal + it.kcal, p: a.p + it.p, c: a.c + it.c, f: a.f + it.f }), { kcal: 0, p: 0, c: 0, f: 0 });
+  setForm({ name: $('#eName').value, ...s });
+  $('#totalsHint').textContent = 'sum of items';
 }
 
 async function openSheet({ entry = null, photo = null } = {}) {
@@ -208,13 +280,16 @@ async function openSheet({ entry = null, photo = null } = {}) {
   $('#sheetTitle').textContent = entry ? 'Edit food' : photo ? 'Snap food' : 'Add food';
   $('#deleteEntry').classList.toggle('hidden', !entry);
   $('#photoArea').classList.toggle('hidden', !photo);
-  $('#estimateStatus').textContent = '';
+  setStatus('');
   $('#photoNote').value = '';
-  $('#eItems').innerHTML = '';
   if (photo) $('#photoPreview').src = photo.dataUrl;
   setForm(entry || {});
+  $('#totalsHint').textContent = '';
   $('#eMeal').value = entry?.meal || defaultMeal();
-  if (entry?.items) renderItems(entry.items, entry.confidence, entry.notes);
+  setItems(entry?.items || [], entry?.confidence ? { confidence: entry.confidence, notes: entry.notes } : null);
+  // The AI box: estimate from a photo, or tell the AI what to fix on an existing entry.
+  $('#aiBox').classList.toggle('hidden', !(photo || entry));
+  updateAiBox();
 
   // recent foods for quick re-logging (manual add only)
   $('#recentWrap').classList.add('hidden');
@@ -227,7 +302,7 @@ async function openSheet({ entry = null, photo = null } = {}) {
       $('#recentList').innerHTML = recent.map((e, i) => `<button type="button" class="chip" data-i="${i}">${esc(e.name)} · ${round(e.kcal)}</button>`).join('');
       $$('#recentList .chip').forEach((b) => b.addEventListener('click', () => {
         const e = recent[+b.dataset.i];
-        setForm(e); baseMacros = null;
+        setForm(e); setItems(e.items || [], null); $('#totalsHint').textContent = '';
         if (e.thumb && !pendingPhoto) pendingPhoto = { thumb: e.thumb, reused: true };
       }));
     }
@@ -235,12 +310,25 @@ async function openSheet({ entry = null, photo = null } = {}) {
   $('#sheet').classList.remove('hidden');
   document.body.style.overflow = 'hidden';
   if (photo && hasAiKey()) estimate();
-  else if (photo) $('#estimateStatus').innerHTML = 'Add a free Gemini API key in Settings to get automatic estimates, or fill in the numbers yourself below.';
+  else if ((photo || entry) && !hasAiKey()) setStatus('Add a free Gemini API key in Settings to get AI estimates and fixes, or fill in the numbers yourself below.');
+}
+
+// Before an estimate exists the box asks for extra info; afterwards it takes corrections.
+function updateAiBox() {
+  const fixing = items.length > 0 || !!editing;
+  $('#noteLabel').textContent = fixing ? 'Tell the AI what to fix' : "Anything the photo can't show? (optional)";
+  $('#photoNote').placeholder = fixing ? 'e.g. only 2 eggs, rice was about 200 g, no sauce' : 'e.g. cooked in butter, large portion, 2 eggs';
+  $('#estimateBtn').textContent = fixing ? 'Fix with AI' : 'Estimate macros';
+}
+function setStatus(text, isError = false) {
+  const el = $('#estimateStatus');
+  el.textContent = text;
+  el.classList.toggle('status-error', isError);
 }
 function closeSheet() {
   $('#sheet').classList.add('hidden');
   document.body.style.overflow = '';
-  editing = null; pendingPhoto = null;
+  editing = null; pendingPhoto = null; items = []; aiMeta = null;
 }
 
 async function saveEntry(ev) {
@@ -251,7 +339,8 @@ async function saveEntry(ev) {
     id: uid(), date: currentDate, time: Date.now(), ...f,
   };
   if (!editing && pendingPhoto?.thumb && settings.keepPhotos) e.thumb = pendingPhoto.thumb;
-  if (!editing && pendingPhoto?.ai) { e.ai = true; e.items = pendingPhoto.ai.items; e.confidence = pendingPhoto.ai.confidence; e.notes = pendingPhoto.ai.notes; }
+  e.items = items.filter((it) => it.name || it.kcal).map((it) => ({ ...it }));
+  if (aiMeta) { e.ai = true; e.confidence = aiMeta.confidence; e.notes = aiMeta.notes; }
   await putEntry(e);
   closeSheet();
   toast(editing ? 'Updated' : `Logged ${round(e.kcal)} kcal`);
@@ -325,16 +414,36 @@ const ESTIMATE_SCHEMA = {
 
 const SYSTEM_PROMPT = `You are a nutrition estimator inside a personal macro-tracking app. The user photographs food they are about to eat. Identify each distinct food or drink, estimate its portion from visual cues (plate and utensil size, packaging, hands), and estimate calories, protein, carbohydrate and fat for the amount shown. Assume typical home or restaurant preparation, including cooking oil and sauces that are likely present. If the user adds a note, trust it over the photo. Totals must equal the sum of the items. If the photo shows no food, return an empty item list, zero totals, low confidence, and say so in notes.`;
 
+// The user message: optional extra info, and for corrections the current estimate to update.
+function userText({ note, current }) {
+  if (current) {
+    return `Here is the current estimate for this meal (as JSON):\n${JSON.stringify(current)}\n\n` +
+      `My correction: ${note}\n\nApply my correction and return the full updated estimate. Keep items I didn't mention as they are, unless the correction affects them.`;
+  }
+  return (note ? `Note from me: ${note}\n` : '') + 'Estimate the macros for this.';
+}
+
+// fetch with a time limit, so a stalled request ends with a clear message instead of spinning.
+async function fetchWithTimeout(url, opts, ms = 60000) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), ms);
+  try { return await fetch(url, { ...opts, signal: ctl.signal }); }
+  catch (e) {
+    if (e.name === 'AbortError') { const err = new Error(`No answer after ${ms / 1000} seconds`); err.status = 504; err.raw = err.message; throw err; }
+    const err = new Error(`Network error: ${e.message}. Check your connection.`); err.status = 599; err.raw = err.message; throw err;
+  } finally { clearTimeout(t); }
+}
+
 function fallbackSupported(model) { return model === 'claude-opus-5-5' || model === 'claude-sonnet-5-5'; }
 
-async function callClaude({ imageDataUrl, note, withFallbacks = true }) {
+async function callClaude({ imageDataUrl, note, current, withFallbacks = true }) {
   const model = settings.model || DEFAULT_SETTINGS.model;
   const useFallbacks = withFallbacks && fallbackSupported(model);
   const content = [];
   if (imageDataUrl) {
     content.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: imageDataUrl.split(',')[1] } });
   }
-  content.push({ type: 'text', text: note ? `Note from me: ${note}\nEstimate the macros for this.` : 'Estimate the macros for this.' });
+  content.push({ type: 'text', text: userText({ note, current }) });
 
   const body = {
     model,
@@ -356,7 +465,7 @@ async function callClaude({ imageDataUrl, note, withFallbacks = true }) {
   if (!res.ok) {
     const msg = data?.error?.message || `HTTP ${res.status}`;
     // If this account or model doesn't accept the fallback option, retry once without it.
-    if (useFallbacks && res.status === 400 && /fallback|beta/i.test(msg)) return callClaude({ imageDataUrl, note, withFallbacks: false });
+    if (useFallbacks && res.status === 400 && /fallback|beta/i.test(msg)) return callClaude({ imageDataUrl, note, current, withFallbacks: false });
     if (res.status === 401) throw new Error('The API key was rejected. Check it in Settings.');
     if (res.status === 429) throw new Error('Rate limited by the API. Wait a moment and try again.');
     if (res.status === 529 || res.status >= 500) throw new Error('The AI service is busy. Try again in a moment.');
@@ -417,6 +526,8 @@ function geminiError(res, data) {
   err.status = res.status;
   err.reason = reason;
   err.raw = raw;
+  const retry = (e.details || []).find((d) => d.retryDelay)?.retryDelay;
+  if (retry) err.retrySec = parseFloat(retry);
   return err;
 }
 const isKeyProblem = (e) => e.status === 401 || e.status === 403 || /API_KEY|ACCESS_TOKEN/.test(e.reason || '') || /api key|referer|location is not supported/i.test(e.raw || '');
@@ -438,10 +549,10 @@ async function listGeminiModels() {
   return ranked;
 }
 
-async function geminiGenerate(model, { imageDataUrl, note }, structured = true) {
+async function geminiGenerate(model, { imageDataUrl, note, current }, structured = true) {
   const parts = [];
   if (imageDataUrl) parts.push({ inline_data: { mime_type: 'image/jpeg', data: imageDataUrl.split(',')[1] } });
-  parts.push({ text: (note ? `Note from me: ${note}\n` : '') + 'Estimate the macros for this.' +
+  parts.push({ text: userText({ note, current }) +
     (structured ? '' : `\nReply with only JSON matching this schema: ${JSON.stringify(ESTIMATE_SCHEMA)}`) });
   const body = {
     systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
@@ -449,7 +560,7 @@ async function geminiGenerate(model, { imageDataUrl, note }, structured = true) 
     generationConfig: { responseMimeType: 'application/json', temperature: 0.2 },
   };
   if (structured) body.generationConfig.responseSchema = toGeminiSchema(ESTIMATE_SCHEMA);
-  const res = await fetch(`${GEMINI_BASE}/models/${encodeURIComponent(model)}:generateContent`, {
+  const res = await fetchWithTimeout(`${GEMINI_BASE}/models/${encodeURIComponent(model)}:generateContent`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-goog-api-key': settings.geminiKey },
     body: JSON.stringify(body),
@@ -462,7 +573,7 @@ async function geminiGenerate(model, { imageDataUrl, note }, structured = true) 
   const text = (cand.content?.parts || []).filter((p) => p.text && !p.thought).map((p) => p.text).join('');
   try {
     return JSON.parse(text.replace(/^```(?:json)?\s*|\s*```$/g, ''));
-  } catch { throw new Error('Could not read the AI answer. Try again.'); }
+  } catch { throw new Error(`Could not read the AI answer (${model}). Try again. It began: ${text.slice(0, 80)}`); }
 }
 
 async function callGemini(args) {
@@ -493,8 +604,8 @@ async function callGemini(args) {
       lastErr = e;
       tried.push(`${model}: ${e.raw || e.message}`);
       if (isKeyProblem(e)) throw e;
-      // Out of free quota (or quota 0), model gone, or model overloaded: try the next one.
-      if (e.status === 429 || e.status === 404 || e.status >= 500) {
+      // Out of quota, model gone, overloaded, timed out, or the model rejected the request: try the next one.
+      if (e.status === 429 || e.status === 404 || e.status >= 500 || e.status === 400) {
         if (e.status === 404 && !settings.geminiModel) settings.geminiCandidates = null;
         if (e.status === 429 && /per ?day/i.test(e.message)) {
           const g = settings.geminiSpent?.date === todayKey() ? settings.geminiSpent : { date: todayKey(), models: [] };
@@ -507,6 +618,13 @@ async function callGemini(args) {
       throw e;
     }
   }
+  // Only per-minute limits were hit (free tier allows a few requests a minute): wait and retry once.
+  if (lastErr?.status === 429 && !/per ?day/i.test(lastErr.message) && !args._retried) {
+    const wait = Math.min(40, Math.max(5, lastErr.retrySec || 20));
+    args.onWait?.(wait);
+    await new Promise((r) => setTimeout(r, wait * 1000));
+    return callGemini({ ...args, _retried: true });
+  }
   const detail = tried.length ? ` Google said: ${tried.join(' | ')}` : '';
   if (lastErr?.status === 429) throw new Error(`No free quota left on any model right now. Daily limits reset at midnight Pacific time.${detail}`);
   if (lastErr?.status >= 500) throw new Error(`Gemini is overloaded right now. Try again in a minute.${detail}`);
@@ -516,26 +634,40 @@ async function callGemini(args) {
 function hasAiKey() { return settings.provider === 'claude' ? !!settings.apiKey : !!settings.geminiKey; }
 function callAi(args) { return settings.provider === 'claude' ? callClaude(args) : callGemini(args); }
 
+let estimating = false;
+let queuedFix = false;       // user tapped the button while a request was running
 async function estimate() {
-  if (!pendingPhoto?.dataUrl) return;
+  if (estimating) { queuedFix = true; setStatus('Got it, will apply your note as soon as the first estimate is done…'); return; }
   if (!hasAiKey()) { toast('Add your API key in Settings first'); return; }
-  const btn = $('#estimateBtn');
-  btn.disabled = true;
-  $('#estimateStatus').innerHTML = '<span class="spinner"></span> Looking at your food…';
+  const note = $('#photoNote').value.trim();
+  const fixing = items.length > 0 || !!editing;
+  if (fixing && !note) { setStatus('Type what to fix first, e.g. "only 2 eggs".', true); $('#photoNote').focus(); return; }
+  // Use the full photo when we have it, else the saved thumbnail of a logged entry.
+  const image = pendingPhoto?.dataUrl || editing?.thumb || null;
+  if (!fixing && !image) return;
+  const current = fixing ? { name: $('#eName').value, items, total: readForm() } : null;
+
+  const sheetSession = { entry: editing, photo: pendingPhoto };
+  estimating = true; queuedFix = false;
+  $('#estimateStatus').classList.remove('status-error');
+  $('#estimateStatus').innerHTML = `<span class="spinner"></span> ${fixing ? 'Applying your fix…' : 'Looking at your food…'}`;
   try {
-    const r = await callAi({ imageDataUrl: pendingPhoto.dataUrl, note: $('#photoNote').value.trim() });
-    if (!pendingPhoto) return; // sheet was closed meanwhile
-    pendingPhoto.ai = { items: r.items, confidence: r.confidence, notes: r.notes };
-    setForm({ name: r.name, kcal: r.kcal, p: r.protein_g, c: r.carbs_g, f: r.fat_g });
-    baseMacros = null;
-    renderItems(r.items, r.confidence, r.notes);
-    $('#estimateStatus').textContent = 'Check the numbers, adjust if needed, then save. Add a note and tap again to re-estimate.';
-    btn.textContent = 'Re-estimate';
+    const r = await callAi({ imageDataUrl: image, note, current,
+      onWait: (sec) => { $('#estimateStatus').innerHTML = `<span class="spinner"></span> Free tier allows only a few requests a minute. Retrying in ${sec} s…`; } });
+    if (editing !== sheetSession.entry || pendingPhoto !== sheetSession.photo || $('#sheet').classList.contains('hidden')) return; // sheet changed meanwhile
+    setForm({ name: r.name || $('#eName').value, kcal: r.kcal, p: r.protein_g, c: r.carbs_g, f: r.fat_g });
+    setItems(r.items, { confidence: r.confidence, notes: r.notes });
+    $('#totalsHint').textContent = items.length ? 'sum of items' : '';
+    if ($('#photoNote').value.trim() === note) $('#photoNote').value = '';
+    updateAiBox();
+    setStatus(fixing ? 'Updated. Check it, then save. You can fix more the same way.' : 'Check the items, fix anything that\'s off right in the list or tell the AI above, then save.');
   } catch (err) {
-    $('#estimateStatus').textContent = err.message;
+    setStatus(err.message, true);
   } finally {
-    btn.disabled = false;
+    estimating = false;
   }
+  // A note typed (and sent) while the first estimate was running gets applied now.
+  if (queuedFix) { queuedFix = false; if ($('#photoNote').value.trim() && !$('#sheet').classList.contains('hidden')) estimate(); }
 }
 
 /* ---------- Progress ---------- */
@@ -748,13 +880,22 @@ function bind() {
     await deleteEntryDb(editing.id); closeSheet(); toast('Deleted'); renderToday();
   });
   $$('.chip[data-scale]').forEach((b) => b.addEventListener('click', () => {
+    // Scales relative to the values before the first tap, so ½× then 2× gives 2× the original.
     const cur = readForm();
-    if (!baseMacros) baseMacros = cur;
+    if (!baseMacros) baseMacros = { ...cur, items: items.map((it) => ({ ...it })) };
     const k = +b.dataset.scale;
-    setForm({ name: cur.name, kcal: baseMacros.kcal * k, p: baseMacros.p * k, c: baseMacros.c * k, f: baseMacros.f * k });
+    items = baseMacros.items.map((it) => ({ ...it, kcal: it.kcal * k, p: it.p * k, c: it.c * k, f: it.f * k, portion: it.portion ? scalePortion(it.portion, k) : '' }));
+    const keep = baseMacros;
+    renderItemEditor();
+    setForm({ name: cur.name, kcal: keep.kcal * k, p: keep.p * k, c: keep.c * k, f: keep.f * k });
+    baseMacros = keep;
     toast(`Scaled to ${b.textContent} the original`);
   }));
-  ['#eKcal', '#eP', '#eC', '#eF'].forEach((s) => $(s).addEventListener('input', () => { baseMacros = null; }));
+  ['#eKcal', '#eP', '#eC', '#eF'].forEach((s) => $(s).addEventListener('input', () => {
+    baseMacros = null;
+    if (items.length) $('#totalsHint').textContent = 'edited by hand';
+  }));
+  $('#photoNote').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); estimate(); } });
 
   $('#weightForm').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -817,5 +958,5 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
 }
 
 // Shown at the bottom of Settings so it's easy to tell which version a phone is running.
-const APP_VERSION = 'v5 (2026-11-23)';
+const APP_VERSION = 'v6 (2026-11-23)';
 $('#appVersion').textContent = APP_VERSION;
