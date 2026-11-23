@@ -370,6 +370,8 @@ async function callClaude({ imageDataUrl, note, withFallbacks = true }) {
 
 /* ---------- Google Gemini (free tier) ---------- */
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta';
+// Free-tier models as of Nov 2026, best first. Flash-Lite has the largest free daily allowance.
+const GEMINI_FREE_MODELS = ['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-flash-latest', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-flash-lite-latest'];
 
 // Gemini takes an OpenAPI-style schema: uppercase types, no additionalProperties.
 function toGeminiSchema(s) {
@@ -392,9 +394,10 @@ function rankGeminiModels(names) {
   const ok = names.filter((n) => /^gemini-[\d.]+-flash(-lite)?$/.test(n));
   const full = ok.filter((n) => !n.endsWith('-lite')).sort((a, b) => ver(b) - ver(a));
   const lite = ok.filter((n) => n.endsWith('-lite')).sort((a, b) => ver(b) - ver(a));
-  const out = [...full, ...lite];
-  for (const alias of ['gemini-flash-latest', 'gemini-flash-lite-latest']) if (names.includes(alias) && !out.includes(alias)) out.push(alias);
-  return out;
+  // Models known to be on the free tier go first; newer models (e.g. Gemini 4) may have a
+  // free quota of 0, so they only come after.
+  const free = GEMINI_FREE_MODELS.filter((n) => names.includes(n));
+  return [...new Set([...free, ...full, ...lite])];
 }
 
 // Turn a Gemini error response into a message that shows Google's own reason plus a hint.
@@ -419,7 +422,7 @@ function geminiError(res, data) {
 const isKeyProblem = (e) => e.status === 401 || e.status === 403 || /API_KEY|ACCESS_TOKEN/.test(e.reason || '') || /api key|referer|location is not supported/i.test(e.raw || '');
 
 // Used if listing models fails (some key types may not be allowed to list models).
-const GEMINI_FALLBACK_MODELS = ['gemini-flash-latest', 'gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash-lite', 'gemini-flash-lite-latest'];
+const GEMINI_FALLBACK_MODELS = GEMINI_FREE_MODELS;
 
 async function listGeminiModels() {
   const res = await fetch(`${GEMINI_BASE}/models?pageSize=1000`, { headers: { 'x-goog-api-key': settings.geminiKey } });
@@ -430,6 +433,7 @@ async function listGeminiModels() {
     .map((m) => m.name.replace(/^models\//, ''));
   const ranked = rankGeminiModels(names);
   settings.geminiCandidates = ranked;
+  settings.geminiRankV = 2;
   saveSettings();
   return ranked;
 }
@@ -462,6 +466,7 @@ async function geminiGenerate(model, { imageDataUrl, note }, structured = true) 
 }
 
 async function callGemini(args) {
+  if (settings.geminiRankV !== 2) { settings.geminiCandidates = null; settings.geminiRankV = 2; saveSettings(); } // re-rank after updates
   let candidates = settings.geminiModel ? [settings.geminiModel] : settings.geminiCandidates;
   if (!candidates?.length) {
     // Listing is only a convenience: if it fails, try well-known models directly. A real key
@@ -475,7 +480,8 @@ async function callGemini(args) {
   const fresh = candidates.filter((m) => !spent.includes(m));
   if (fresh.length) candidates = fresh;
   let lastErr;
-  for (const model of candidates.slice(0, 4)) {
+  const tried = [];
+  for (const model of candidates.slice(0, 6)) {
     try {
       try { return await geminiGenerate(model, args, true); }
       catch (e) {
@@ -485,9 +491,10 @@ async function callGemini(args) {
       }
     } catch (e) {
       lastErr = e;
+      tried.push(`${model}: ${e.raw || e.message}`);
       if (isKeyProblem(e)) throw e;
-      // Daily free limit hit on this model, or model gone: try the next one.
-      if (e.status === 429 || e.status === 404) {
+      // Out of free quota (or quota 0), model gone, or model overloaded: try the next one.
+      if (e.status === 429 || e.status === 404 || e.status >= 500) {
         if (e.status === 404 && !settings.geminiModel) settings.geminiCandidates = null;
         if (e.status === 429 && /per ?day/i.test(e.message)) {
           const g = settings.geminiSpent?.date === todayKey() ? settings.geminiSpent : { date: todayKey(), models: [] };
@@ -497,12 +504,13 @@ async function callGemini(args) {
         saveSettings();
         continue;
       }
-      if (e.status >= 500) throw new Error('Gemini is busy. Try again in a moment.');
       throw e;
     }
   }
-  if (lastErr?.status === 429) throw new Error('Free daily limit reached. It resets at midnight Pacific time. You can still enter the numbers yourself.');
-  throw lastErr || new Error('Estimate failed');
+  const detail = tried.length ? ` Google said: ${tried.join(' | ')}` : '';
+  if (lastErr?.status === 429) throw new Error(`No free quota left on any model right now. Daily limits reset at midnight Pacific time.${detail}`);
+  if (lastErr?.status >= 500) throw new Error(`Gemini is overloaded right now. Try again in a minute.${detail}`);
+  throw lastErr ? new Error(`${lastErr.message}${detail}`) : new Error('Estimate failed');
 }
 
 function hasAiKey() { return settings.provider === 'claude' ? !!settings.apiKey : !!settings.geminiKey; }
