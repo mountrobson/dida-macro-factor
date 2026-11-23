@@ -3,21 +3,214 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0f172a">
+<meta name="theme-color" content="#14130f">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="DiDa">
 <title>DiDa Macros</title>
-<style>
-  :root { --bg:#0f172a; --fg:#e2e8f0; --muted:#94a3b8; --accent:#22c55e; }
-  * { box-sizing:border-box; }
-  body { margin:0; min-height:100vh; display:flex; flex-direction:column; align-items:center; justify-content:center;
-         padding:24px 16px; background:var(--bg); color:var(--fg);
-         font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; text-align:center; }
-  h1 { margin:0 0 8px; font-size:2rem; }
-  p { color:var(--muted); max-width:28rem; line-height:1.5; }
-  .dot { color:var(--accent); }
-</style>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <h1>DiDa Macros<span class="dot">.</span></h1>
-  <p>Photo-based macro tracking is coming soon. This page confirms GitHub Pages is live.</p>
+<header class="topbar">
+  <button class="icon-btn" id="prevDay" aria-label="Previous day">‹</button>
+  <button class="date-btn" id="dateLabel">Today</button>
+  <button class="icon-btn" id="nextDay" aria-label="Next day">›</button>
+</header>
+
+<main>
+  <!-- TODAY -->
+  <section class="view" id="view-today">
+    <div class="card summary">
+      <div class="ring-wrap">
+        <svg viewBox="0 0 120 120" class="ring">
+          <circle cx="60" cy="60" r="52" class="ring-bg"/>
+          <circle cx="60" cy="60" r="52" class="ring-fg" id="kcalRing"/>
+        </svg>
+        <div class="ring-text">
+          <div class="big" id="kcalLeft">0</div>
+          <div class="sub" id="kcalLeftLabel">kcal left</div>
+        </div>
+      </div>
+      <div class="macros" id="macroBars"></div>
+    </div>
+
+    <div class="quick">
+      <button class="btn primary" data-action="photo">📷 Snap</button>
+      <button class="btn" data-action="library">🖼️ Photo</button>
+      <button class="btn" data-action="manual">＋ Manual</button>
+    </div>
+
+    <div id="mealList"></div>
+  </section>
+
+  <!-- PROGRESS -->
+  <section class="view hidden" id="view-progress">
+    <div class="card">
+      <h2>Weight</h2>
+      <form id="weightForm" class="row">
+        <input type="number" step="0.1" inputmode="decimal" id="weightInput" placeholder="Today's weight">
+        <span class="unit" id="weightUnit">kg</span>
+        <button class="btn primary" type="submit">Log</button>
+      </form>
+      <div id="weightStats" class="stats"></div>
+      <div id="weightChart" class="chart"></div>
+    </div>
+    <div class="card">
+      <h2>Last 7 days</h2>
+      <div id="weekTable"></div>
+    </div>
+    <div class="card">
+      <h2>Recent weigh-ins</h2>
+      <div id="weightList"></div>
+    </div>
+  </section>
+
+  <!-- SETTINGS -->
+  <section class="view hidden" id="view-settings">
+    <div class="card">
+      <h2>Daily targets</h2>
+      <div class="grid2">
+        <label>Calories<input type="number" inputmode="numeric" id="tKcal"></label>
+        <label>Protein (g)<input type="number" inputmode="numeric" id="tP"></label>
+        <label>Carbs (g)<input type="number" inputmode="numeric" id="tC"></label>
+        <label>Fat (g)<input type="number" inputmode="numeric" id="tF"></label>
+      </div>
+      <button class="btn primary full" id="saveTargets">Save targets</button>
+      <details class="calc">
+        <summary>Work out targets for me</summary>
+        <div class="grid2">
+          <label>Sex<select id="cSex"><option value="m">Male</option><option value="f">Female</option></select></label>
+          <label>Age<input type="number" inputmode="numeric" id="cAge" value="35"></label>
+          <label>Height (cm)<input type="number" inputmode="numeric" id="cHeight" value="178"></label>
+          <label>Weight (<span class="wu">kg</span>)<input type="number" inputmode="decimal" id="cWeight" value="80"></label>
+          <label>Activity<select id="cAct">
+            <option value="1.2">Mostly sitting</option>
+            <option value="1.375" selected>Light (1–3 workouts/wk)</option>
+            <option value="1.55">Moderate (3–5/wk)</option>
+            <option value="1.725">Very active (6–7/wk)</option>
+          </select></label>
+          <label>Goal<select id="cGoal">
+            <option value="-0.2">Lose (faster)</option>
+            <option value="-0.12" selected>Lose (steady)</option>
+            <option value="0">Maintain</option>
+            <option value="0.08">Gain (lean)</option>
+          </select></label>
+        </div>
+        <button class="btn full" id="calcTargets">Calculate and fill in</button>
+        <p class="hint">Uses the Mifflin‑St Jeor formula. Protein is set to about 2 g per kg, fat to about 28% of calories, and carbs fill the rest.</p>
+      </details>
+    </div>
+
+    <div class="card">
+      <h2>Photo estimates (AI)</h2>
+      <label>AI service<select id="provider">
+        <option value="gemini">Google Gemini (free)</option>
+        <option value="claude">Anthropic Claude (paid per photo)</option>
+      </select></label>
+      <div id="geminiBox">
+        <p class="hint">Free: get a key at aistudio.google.com (Get API key). No credit card is needed. When the free daily limit runs out, estimates stop until the next day and you are never charged. Google may review free-tier photos to improve its products. The key is saved only on this phone.</p>
+        <label>Gemini API key<input type="password" id="geminiKey" autocomplete="off" placeholder="AIza..."></label>
+        <label>Model<select id="geminiModel"><option value="">Pick automatically</option></select></label>
+      </div>
+      <div id="claudeBox">
+        <p class="hint">Paid per photo, billed by Anthropic. Get a key at console.anthropic.com. The key is saved only on this phone.</p>
+        <label>Anthropic API key<input type="password" id="apiKey" autocomplete="off" placeholder="sk-ant-..."></label>
+        <label>Model<select id="model">
+          <option value="claude-opus-5-5">Claude Opus 5.5 (most accurate)</option>
+          <option value="claude-sonnet-5-5">Claude Sonnet 5.5 (faster, cheaper)</option>
+          <option value="claude-haiku-5-5">Claude Haiku 5.5 (fastest, cheapest)</option>
+        </select></label>
+      </div>
+      <label class="check"><input type="checkbox" id="keepPhotos" checked> Keep a small thumbnail of each photo on this phone</label>
+      <div class="row">
+        <button class="btn primary" id="saveAi">Save</button>
+        <button class="btn" id="testAi">Test key</button>
+      </div>
+      <p class="hint" id="aiStatus"></p>
+    </div>
+
+    <div class="card">
+      <h2>Units</h2>
+      <label>Weight unit<select id="unit"><option value="kg">kg</option><option value="lb">lb</option></select></label>
+    </div>
+
+    <div class="card">
+      <h2>Your data</h2>
+      <p class="hint">Everything is stored in this browser on this phone. Export a backup now and then.</p>
+      <div class="row wrap">
+        <button class="btn" id="exportBtn">Export backup</button>
+        <label class="btn file-btn">Import backup<input type="file" accept="application/json" id="importFile" hidden></label>
+        <button class="btn danger" id="wipeBtn">Delete everything</button>
+      </div>
+    </div>
+    <p class="hint center">DiDa Macros · estimates are approximate, not medical advice</p>
+  </section>
+</main>
+
+<nav class="tabbar">
+  <button class="tab active" data-view="today"><span>🍽️</span>Log</button>
+  <button class="tab snap" data-action="photo" aria-label="Snap food"><span>📷</span></button>
+  <button class="tab" data-view="progress"><span>📈</span>Progress</button>
+  <button class="tab" data-view="settings"><span>⚙️</span>Settings</button>
+</nav>
+
+<input type="file" accept="image/*" capture="environment" id="cameraInput" hidden>
+<input type="file" accept="image/*" id="libraryInput" hidden>
+<input type="date" id="datePicker" class="sr-only" tabindex="-1">
+
+<!-- Entry editor sheet -->
+<div class="sheet-backdrop hidden" id="sheet">
+  <div class="sheet" role="dialog" aria-modal="true">
+    <div class="sheet-head">
+      <h2 id="sheetTitle">Add food</h2>
+      <button class="icon-btn" id="closeSheet" aria-label="Close">✕</button>
+    </div>
+    <div id="photoArea" class="photo-area hidden">
+      <img id="photoPreview" alt="Your food photo">
+      <label>Anything the photo can't show? (optional)
+        <input type="text" id="photoNote" placeholder="e.g. cooked in butter, large portion, 2 eggs">
+      </label>
+      <button class="btn primary full" id="estimateBtn">Estimate macros</button>
+      <div id="estimateStatus" class="hint"></div>
+    </div>
+    <form id="entryForm" class="entry-form">
+      <label>What is it<input type="text" id="eName" required placeholder="Chicken rice bowl"></label>
+      <div id="eItems" class="items"></div>
+      <div class="grid4">
+        <label>kcal<input type="number" inputmode="decimal" id="eKcal" required></label>
+        <label>Protein<input type="number" inputmode="decimal" id="eP"></label>
+        <label>Carbs<input type="number" inputmode="decimal" id="eC"></label>
+        <label>Fat<input type="number" inputmode="decimal" id="eF"></label>
+      </div>
+      <div class="portion">
+        <span>Portion</span>
+        <button type="button" class="chip" data-scale="0.5">½×</button>
+        <button type="button" class="chip" data-scale="0.75">¾×</button>
+        <button type="button" class="chip" data-scale="1.25">1¼×</button>
+        <button type="button" class="chip" data-scale="1.5">1½×</button>
+        <button type="button" class="chip" data-scale="2">2×</button>
+      </div>
+      <label>Meal<select id="eMeal">
+        <option>Breakfast</option><option>Lunch</option><option>Dinner</option><option>Snack</option>
+      </select></label>
+      <div id="recentWrap" class="recent hidden">
+        <div class="hint">Recent foods</div>
+        <div id="recentList" class="chips"></div>
+      </div>
+      <div class="row">
+        <button type="button" class="btn danger hidden" id="deleteEntry">Delete</button>
+        <button type="submit" class="btn primary grow" id="saveEntry">Save</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="toast hidden" id="toast"></div>
+
+<script src="app.js"></script>
 </body>
 </html>
