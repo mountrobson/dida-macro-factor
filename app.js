@@ -807,5 +807,15 @@ function bind() {
 bind();
 showView('today');
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
-  navigator.serviceWorker.register('sw.js').catch(() => {});
+  // Always check for a new version, and reload once when it takes over so the new code runs.
+  const hadController = !!navigator.serviceWorker.controller;
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (hadController && !reloaded && !document.querySelector('#sheet:not(.hidden)')) { reloaded = true; location.reload(); }
+  });
+  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then((r) => r.update()).catch(() => {});
 }
+
+// Shown at the bottom of Settings so it's easy to tell which version a phone is running.
+const APP_VERSION = 'v5 (2026-11-23)';
+$('#appVersion').textContent = APP_VERSION;

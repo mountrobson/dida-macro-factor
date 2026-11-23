@@ -12,7 +12,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icon-180.png">
-<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="styles.css?v=5">
 </head>
 <body>
 <header class="topbar">
@@ -147,7 +147,7 @@
         <button class="btn danger" id="wipeBtn">Delete everything</button>
       </div>
     </div>
-    <p class="hint center">DiDa Macros · estimates are approximate, not medical advice</p>
+    <p class="hint center">DiDa Macros <span id="appVersion"></span> · estimates are approximate, not medical advice</p>
   </section>
 </main>
 
@@ -211,6 +211,6 @@
 
 <div class="toast hidden" id="toast"></div>
 
-<script src="app.js"></script>
+<script src="app.js?v=5"></script>
 </body>
 </html>
