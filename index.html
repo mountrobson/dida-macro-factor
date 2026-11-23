@@ -12,7 +12,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icon-180.png">
-<link rel="stylesheet" href="styles.css?v=5">
+<link rel="stylesheet" href="styles.css?v=6">
 </head>
 <body>
 <header class="topbar">
@@ -171,15 +171,18 @@
     </div>
     <div id="photoArea" class="photo-area hidden">
       <img id="photoPreview" alt="Your food photo">
-      <label>Anything the photo can't show? (optional)
-        <input type="text" id="photoNote" placeholder="e.g. cooked in butter, large portion, 2 eggs">
+    </div>
+    <div id="aiBox" class="ai-box hidden">
+      <label><span id="noteLabel">Anything the photo can't show? (optional)</span>
+        <textarea id="photoNote" rows="2" enterkeyhint="send" placeholder="e.g. cooked in butter, large portion, 2 eggs"></textarea>
       </label>
-      <button class="btn primary full" id="estimateBtn">Estimate macros</button>
+      <button type="button" class="btn primary full" id="estimateBtn">Estimate macros</button>
       <div id="estimateStatus" class="hint"></div>
     </div>
     <form id="entryForm" class="entry-form">
       <label>What is it<input type="text" id="eName" required placeholder="Chicken rice bowl"></label>
       <div id="eItems" class="items"></div>
+      <div class="totals-head"><span>Total</span><span class="hint" id="totalsHint"></span></div>
       <div class="grid4">
         <label>kcal<input type="number" inputmode="decimal" id="eKcal" required></label>
         <label>Protein<input type="number" inputmode="decimal" id="eP"></label>
@@ -211,6 +214,6 @@
 
 <div class="toast hidden" id="toast"></div>
 
-<script src="app.js?v=5"></script>
+<script src="app.js?v=6"></script>
 </body>
 </html>
