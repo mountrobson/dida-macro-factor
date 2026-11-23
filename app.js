@@ -27,7 +27,10 @@ function toast(msg, ms = 2200) {
 /* ---------- settings (localStorage) ---------- */
 const DEFAULT_SETTINGS = {
   targets: { kcal: 2200, p: 160, c: 220, f: 70 },
-  apiKey: '',
+  provider: 'gemini',        // 'gemini' (free tier) or 'claude' (paid)
+  geminiKey: '',
+  geminiModel: '',           // '' = pick automatically from the models the key can use
+  apiKey: '',                // Anthropic key
   model: 'claude-opus-5-5',
   keepPhotos: true,
   unit: 'kg',
@@ -231,8 +234,8 @@ async function openSheet({ entry = null, photo = null } = {}) {
   }
   $('#sheet').classList.remove('hidden');
   document.body.style.overflow = 'hidden';
-  if (photo && settings.apiKey) estimate();
-  else if (photo) $('#estimateStatus').innerHTML = 'Add your Anthropic API key in Settings to get automatic estimates, or fill in the numbers yourself below.';
+  if (photo && hasAiKey()) estimate();
+  else if (photo) $('#estimateStatus').innerHTML = 'Add a free Gemini API key in Settings to get automatic estimates, or fill in the numbers yourself below.';
 }
 function closeSheet() {
   $('#sheet').classList.add('hidden');
@@ -365,14 +368,134 @@ async function callClaude({ imageDataUrl, note, withFallbacks = true }) {
   try { return JSON.parse(text); } catch { throw new Error('Could not read the AI answer. Try again.'); }
 }
 
+/* ---------- Google Gemini (free tier) ---------- */
+const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta';
+
+// Gemini takes an OpenAPI-style schema: uppercase types, no additionalProperties.
+function toGeminiSchema(s) {
+  const out = { type: String(s.type).toUpperCase() };
+  if (s.description) out.description = s.description;
+  if (s.enum) { out.enum = s.enum; out.format = 'enum'; }
+  if (s.items) out.items = toGeminiSchema(s.items);
+  if (s.properties) {
+    out.properties = Object.fromEntries(Object.entries(s.properties).map(([k, v]) => [k, toGeminiSchema(v)]));
+    out.required = s.required;
+    out.propertyOrdering = Object.keys(s.properties);
+  }
+  return out;
+}
+
+// Rank the models a key can use: newest full Flash first (best accuracy), then Flash-Lite
+// (bigger free daily allowance). Image-generation, audio and other special models are skipped.
+function rankGeminiModels(names) {
+  const ver = (n) => parseFloat((n.match(/gemini-(\d+(?:\.\d+)?)/) || [])[1] || 0);
+  const ok = names.filter((n) => /^gemini-[\d.]+-flash(-lite)?$/.test(n));
+  const full = ok.filter((n) => !n.endsWith('-lite')).sort((a, b) => ver(b) - ver(a));
+  const lite = ok.filter((n) => n.endsWith('-lite')).sort((a, b) => ver(b) - ver(a));
+  const out = [...full, ...lite];
+  for (const alias of ['gemini-flash-latest', 'gemini-flash-lite-latest']) if (names.includes(alias) && !out.includes(alias)) out.push(alias);
+  return out;
+}
+
+async function listGeminiModels() {
+  const res = await fetch(`${GEMINI_BASE}/models?pageSize=1000`, { headers: { 'x-goog-api-key': settings.geminiKey } });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    if (res.status === 400 || res.status === 403) throw new Error('The Gemini key was rejected. Check it in Settings.');
+    throw new Error(data?.error?.message || `HTTP ${res.status}`);
+  }
+  const names = (data.models || [])
+    .filter((m) => (m.supportedGenerationMethods || []).includes('generateContent'))
+    .map((m) => m.name.replace(/^models\//, ''));
+  const ranked = rankGeminiModels(names);
+  settings.geminiCandidates = ranked;
+  saveSettings();
+  return ranked;
+}
+
+async function geminiGenerate(model, { imageDataUrl, note }, structured = true) {
+  const parts = [];
+  if (imageDataUrl) parts.push({ inline_data: { mime_type: 'image/jpeg', data: imageDataUrl.split(',')[1] } });
+  parts.push({ text: (note ? `Note from me: ${note}\n` : '') + 'Estimate the macros for this.' +
+    (structured ? '' : `\nReply with only JSON matching this schema: ${JSON.stringify(ESTIMATE_SCHEMA)}`) });
+  const body = {
+    systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    contents: [{ role: 'user', parts }],
+    generationConfig: { responseMimeType: 'application/json', temperature: 0.2 },
+  };
+  if (structured) body.generationConfig.responseSchema = toGeminiSchema(ESTIMATE_SCHEMA);
+  const res = await fetch(`${GEMINI_BASE}/models/${encodeURIComponent(model)}:generateContent`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-goog-api-key': settings.geminiKey },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data?.error?.message || `HTTP ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+  const cand = (data.candidates || [])[0];
+  if (!cand) throw new Error(data.promptFeedback?.blockReason ? 'Gemini declined this photo. Enter the numbers yourself.' : 'Gemini returned no answer. Try again.');
+  if (cand.finishReason === 'MAX_TOKENS') throw new Error('The estimate got cut off. Try again.');
+  const text = (cand.content?.parts || []).filter((p) => p.text && !p.thought).map((p) => p.text).join('');
+  try {
+    return JSON.parse(text.replace(/^```(?:json)?\s*|\s*```$/g, ''));
+  } catch { throw new Error('Could not read the AI answer. Try again.'); }
+}
+
+async function callGemini(args) {
+  let candidates = settings.geminiModel ? [settings.geminiModel]
+    : (settings.geminiCandidates?.length ? settings.geminiCandidates : await listGeminiModels());
+  if (!candidates.length) throw new Error('This key has no Gemini Flash models available.');
+  // Skip models whose free daily limit already ran out today (limits reset at midnight Pacific;
+  // the local date is close enough, and a wrong skip just falls back to the next model).
+  const spent = (settings.geminiSpent?.date === todayKey()) ? settings.geminiSpent.models : [];
+  const fresh = candidates.filter((m) => !spent.includes(m));
+  if (fresh.length) candidates = fresh;
+  let lastErr;
+  for (const model of candidates.slice(0, 4)) {
+    try {
+      try { return await geminiGenerate(model, args, true); }
+      catch (e) {
+        // Some models reject a response schema; ask for plain JSON instead.
+        if (e.status === 400 && /schema|response_?mime|responseSchema/i.test(e.message)) return await geminiGenerate(model, args, false);
+        throw e;
+      }
+    } catch (e) {
+      lastErr = e;
+      if (e.status === 400 && /api key/i.test(e.message)) throw new Error('The Gemini key was rejected. Check it in Settings.');
+      if (e.status === 403) throw new Error('The Gemini key was rejected. Check it in Settings.');
+      // Daily free limit hit on this model, or model gone: try the next one.
+      if (e.status === 429 || e.status === 404) {
+        if (e.status === 404 && !settings.geminiModel) settings.geminiCandidates = null;
+        if (e.status === 429 && /per ?day/i.test(e.message)) {
+          const g = settings.geminiSpent?.date === todayKey() ? settings.geminiSpent : { date: todayKey(), models: [] };
+          if (!g.models.includes(model)) g.models.push(model);
+          settings.geminiSpent = g;
+        }
+        saveSettings();
+        continue;
+      }
+      if (e.status >= 500) throw new Error('Gemini is busy. Try again in a moment.');
+      throw e;
+    }
+  }
+  if (lastErr?.status === 429) throw new Error('Free daily limit reached. It resets at midnight Pacific time. You can still enter the numbers yourself.');
+  throw lastErr || new Error('Estimate failed');
+}
+
+function hasAiKey() { return settings.provider === 'claude' ? !!settings.apiKey : !!settings.geminiKey; }
+function callAi(args) { return settings.provider === 'claude' ? callClaude(args) : callGemini(args); }
+
 async function estimate() {
   if (!pendingPhoto?.dataUrl) return;
-  if (!settings.apiKey) { toast('Add your API key in Settings first'); return; }
+  if (!hasAiKey()) { toast('Add your API key in Settings first'); return; }
   const btn = $('#estimateBtn');
   btn.disabled = true;
   $('#estimateStatus').innerHTML = '<span class="spinner"></span> Looking at your food…';
   try {
-    const r = await callClaude({ imageDataUrl: pendingPhoto.dataUrl, note: $('#photoNote').value.trim() });
+    const r = await callAi({ imageDataUrl: pendingPhoto.dataUrl, note: $('#photoNote').value.trim() });
     if (!pendingPhoto) return; // sheet was closed meanwhile
     pendingPhoto.ai = { items: r.items, confidence: r.confidence, notes: r.notes };
     setForm({ name: r.name, kcal: r.kcal, p: r.protein_g, c: r.carbs_g, f: r.fat_g });
@@ -479,12 +602,36 @@ function weightChart(series) {
 function renderSettings() {
   const T = settings.targets;
   $('#tKcal').value = T.kcal; $('#tP').value = T.p; $('#tC').value = T.c; $('#tF').value = T.f;
+  $('#provider').value = settings.provider;
+  $('#geminiKey').value = settings.geminiKey;
+  renderGeminiModels();
   $('#apiKey').value = settings.apiKey;
   $('#model').value = settings.model;
+  showProviderBox();
   $('#keepPhotos').checked = settings.keepPhotos;
   $('#unit').value = settings.unit;
   $$('.wu').forEach((el) => { el.textContent = settings.unit; });
-  $('#aiStatus').textContent = settings.apiKey ? 'A key is saved on this phone.' : 'No key saved yet.';
+  $('#aiStatus').textContent = hasAiKey() ? 'A key is saved on this phone.' : 'No key saved yet.';
+}
+function showProviderBox() {
+  const p = $('#provider').value;
+  $('#geminiBox').classList.toggle('hidden', p !== 'gemini');
+  $('#claudeBox').classList.toggle('hidden', p !== 'claude');
+}
+function renderGeminiModels() {
+  const list = [...new Set([...(settings.geminiCandidates || []), settings.geminiModel].filter(Boolean))];
+  $('#geminiModel').innerHTML = '<option value="">Pick automatically</option>' + list.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join('');
+  $('#geminiModel').value = settings.geminiModel || '';
+}
+function readAiSettings() {
+  settings.provider = $('#provider').value;
+  const gk = $('#geminiKey').value.trim();
+  if (gk !== settings.geminiKey) { settings.geminiKey = gk; settings.geminiCandidates = null; }
+  settings.geminiModel = $('#geminiModel').value;
+  settings.apiKey = $('#apiKey').value.trim();
+  settings.model = $('#model').value;
+  settings.keepPhotos = $('#keepPhotos').checked;
+  saveSettings();
 }
 
 function calcTargets() {
@@ -502,7 +649,7 @@ function calcTargets() {
 
 async function exportData() {
   const data = { app: 'dida-macros', version: 1, exported: new Date().toISOString(),
-    settings: { ...settings, apiKey: undefined }, entries: await allEntries(), weights: await allWeights() };
+    settings: { ...settings, apiKey: undefined, geminiKey: undefined }, entries: await allEntries(), weights: await allWeights() };
   const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -518,7 +665,11 @@ async function importData(file) {
     if (!confirm(`Import ${data.entries?.length || 0} foods and ${data.weights?.length || 0} weigh-ins? Matching items are overwritten.`)) return;
     for (const e of data.entries || []) await putEntry(e);
     for (const w of data.weights || []) await putWeight(w);
-    if (data.settings) { const key = settings.apiKey; settings = { ...settings, ...data.settings, apiKey: key }; saveSettings(); }
+    if (data.settings) {
+      const { apiKey, geminiKey } = settings;
+      settings = { ...settings, ...data.settings, apiKey, geminiKey };
+      saveSettings();
+    }
     toast('Backup imported');
     renderSettings();
   } catch (err) { toast(err.message || 'Import failed'); }
@@ -592,21 +743,17 @@ function bind() {
     saveSettings(); toast('Targets saved');
   });
   $('#calcTargets').addEventListener('click', calcTargets);
-  $('#saveAi').addEventListener('click', () => {
-    settings.apiKey = $('#apiKey').value.trim();
-    settings.model = $('#model').value;
-    settings.keepPhotos = $('#keepPhotos').checked;
-    saveSettings(); renderSettings(); toast('Saved');
-  });
+  $('#provider').addEventListener('change', showProviderBox);
+  $('#saveAi').addEventListener('click', () => { readAiSettings(); renderSettings(); toast('Saved'); });
   $('#testAi').addEventListener('click', async () => {
-    settings.apiKey = $('#apiKey').value.trim();
-    settings.model = $('#model').value;
-    saveSettings();
-    if (!settings.apiKey) { toast('Paste a key first'); return; }
+    readAiSettings();
+    if (!hasAiKey()) { toast('Paste a key first'); return; }
     $('#aiStatus').innerHTML = '<span class="spinner"></span> Testing…';
     try {
-      const r = await callClaude({ note: 'One medium banana.' });
-      $('#aiStatus').textContent = `Works. Test answer: one banana ≈ ${round(r.kcal)} kcal.`;
+      if (settings.provider === 'gemini' && !settings.geminiModel) { await listGeminiModels(); renderGeminiModels(); }
+      const r = await callAi({ note: 'One medium banana.' });
+      const which = settings.provider === 'gemini' ? ` Models available: ${(settings.geminiCandidates || [settings.geminiModel]).slice(0, 3).join(', ')}.` : '';
+      $('#aiStatus').textContent = `Works. Test answer: one banana ≈ ${round(r.kcal)} kcal.${which}`;
     } catch (err) { $('#aiStatus').textContent = `Failed: ${err.message}`; }
   });
   $('#unit').addEventListener('change', () => { settings.unit = $('#unit').value; saveSettings(); renderSettings(); });

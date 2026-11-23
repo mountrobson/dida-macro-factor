@@ -107,13 +107,24 @@
 
     <div class="card">
       <h2>Photo estimates (AI)</h2>
-      <p class="hint">Photos are sent straight from your phone to Anthropic's Claude API using your own key. The key is saved only on this device and never goes into the repo. Get a key at console.anthropic.com.</p>
-      <label>Anthropic API key<input type="password" id="apiKey" autocomplete="off" placeholder="sk-ant-..."></label>
-      <label>Model<select id="model">
-        <option value="claude-opus-5-5">Claude Opus 5.5 (most accurate)</option>
-        <option value="claude-sonnet-5-5">Claude Sonnet 5.5 (faster, cheaper)</option>
-        <option value="claude-haiku-5-5">Claude Haiku 5.5 (fastest, cheapest)</option>
+      <label>AI service<select id="provider">
+        <option value="gemini">Google Gemini (free)</option>
+        <option value="claude">Anthropic Claude (paid per photo)</option>
       </select></label>
+      <div id="geminiBox">
+        <p class="hint">Free: get a key at aistudio.google.com (Get API key). No credit card is needed. When the free daily limit runs out, estimates stop until the next day and you are never charged. Google may review free-tier photos to improve its products. The key is saved only on this phone.</p>
+        <label>Gemini API key<input type="password" id="geminiKey" autocomplete="off" placeholder="AIza..."></label>
+        <label>Model<select id="geminiModel"><option value="">Pick automatically</option></select></label>
+      </div>
+      <div id="claudeBox">
+        <p class="hint">Paid per photo, billed by Anthropic. Get a key at console.anthropic.com. The key is saved only on this phone.</p>
+        <label>Anthropic API key<input type="password" id="apiKey" autocomplete="off" placeholder="sk-ant-..."></label>
+        <label>Model<select id="model">
+          <option value="claude-opus-5-5">Claude Opus 5.5 (most accurate)</option>
+          <option value="claude-sonnet-5-5">Claude Sonnet 5.5 (faster, cheaper)</option>
+          <option value="claude-haiku-5-5">Claude Haiku 5.5 (fastest, cheapest)</option>
+        </select></label>
+      </div>
       <label class="check"><input type="checkbox" id="keepPhotos" checked> Keep a small thumbnail of each photo on this phone</label>
       <div class="row">
         <button class="btn primary" id="saveAi">Save</button>
